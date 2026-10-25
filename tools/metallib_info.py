@@ -22,6 +22,11 @@ TRIPLE = re.compile(rb'air64_v\d+-apple-[a-z]+[0-9.]*')
 # between name separators, as it does in intrinsic and symbol names.
 AGX = re.compile(rb'[A-Za-z0-9_.]*[._]agx[._][A-Za-z0-9_.]*')
 NAME_CHARS = re.compile(rb'[A-Za-z0-9_.]*')
+# AIR names for features that tile-based Apple GPUs have and Vulkan maps only
+# partly or with extensions; metal2vulkan's REFUSALS.md lists the conditions.
+GPU_FEATURES = ('imageblock', 'tile', 'raster_order', 'framebuffer_fetch', 'color_attachment',
+                'simdgroup_matrix', 'simd_', 'quad_', 'mesh', 'object', 'visible',
+                'intersection', 'tensor')
 
 
 def air_names(blob):
@@ -183,7 +188,9 @@ def analyse_bytes(d, report):
         'agx_functions_sample': [fn.get('name') for fn in functions if fn.get('agx')][:20],
         'air_names': len(air),
         'air_families': dict(collections.Counter(
-            '.'.join(n.split('.')[:2]) for n in air).most_common(40)),
+            '.'.join(n.split('.')[:2]) for n in air).most_common()),
+        'gpu_features': {k: sorted(n for n in air if k in n)[:12]
+                         for k in GPU_FEATURES if any(k in n for n in air)},
     })
     return report
 
@@ -237,8 +244,13 @@ def render(reports):
                 out.append('用到它们的函数（前 20 个）：' + ', '.join(
                     f'`{n}`' for n in r['agx_functions_sample']))
                 out.append('')
+        if r.get('gpu_features'):
+            out.append('苹果 GPU 相关功能的 AIR 名称：')
+            out += [f"- {k}：" + ', '.join(f'`{n}`' for n in names)
+                    for k, names in r['gpu_features'].items()]
+            out.append('')
         if r.get('air_families'):
-            out.append(f"AIR 名称前缀（共 {r['air_names']} 个不同名称，按前两段归类，前 40）：")
+            out.append(f"AIR 名称前缀（共 {r['air_names']} 个不同名称，按前两段归类）：")
             out.append(', '.join(f'`{k}` {v}' for k, v in r['air_families'].items()))
             out.append('')
     return '\n'.join(out) + '\n'
