@@ -90,9 +90,53 @@ def scan_module(blob):
     }
 
 
+FAT_MAGICS = {b'\xca\xfe\xba\xbe': False, b'\xca\xfe\xba\xbf': True}
+
+
+def fat_slices(d):
+    """Slices of a universal (fat) Mach-O: (cputype, cpusubtype, offset, size)."""
+    wide = FAT_MAGICS[d[:4]]
+    count = struct.unpack_from('>I', d, 4)[0]
+    out, p = [], 8
+    for _ in range(count):
+        if wide:
+            cpu, sub, off, size = struct.unpack_from('>IIQQ', d, p)
+            p += 32
+        else:
+            cpu, sub, off, size = struct.unpack_from('>IIII', d, p)
+            p += 20
+        out.append((cpu, sub, off, size))
+    return out
+
+
 def analyse(path):
     d = open(path, 'rb').read()
-    report = {'path': path, 'bytes': len(d)}
+    report = {'path': path, 'bytes': len(d), 'magic': d[:8].hex()}
+    if d[:4] in FAT_MAGICS:
+        # System libraries ship as universal files: an AIR slice plus GPU binaries.
+        report['container'] = 'fat'
+        report['slices'] = []
+        for cpu, sub, off, size in fat_slices(d):
+            part = d[off:off + size]
+            entry = {'cputype': hex(cpu), 'cpusubtype': hex(sub), 'bytes': len(part),
+                     'magic': part[:8].hex()}
+            if part[:4] == b'MTLB':
+                entry['metallib'] = analyse_bytes(part, {})
+            report['slices'].append(entry)
+        return report
+    if d[:4] != b'MTLB':
+        embedded = [m.start() for m in re.finditer(b'MTLB', d) if m.start() % 4 == 0]
+        report['embedded_mtlb'] = embedded[:16]
+        if embedded:
+            report['container'] = 'embedded'
+            report['slices'] = [{'offset': o, 'metallib': analyse_bytes(d[o:], {})}
+                                for o in embedded[:16]]
+            return report
+    return analyse_bytes(d, report)
+
+
+def analyse_bytes(d, report):
+    report.setdefault('bytes', len(d))
     header = parse_header(d)
     report['header'] = header
     if header is None:
@@ -144,15 +188,33 @@ def analyse(path):
     return report
 
 
+def flatten(reports):
+    """One entry per metallib, with fat slices and embedded libraries listed separately."""
+    rows = []
+    for r in reports:
+        if 'slices' not in r:
+            rows.append(r)
+            continue
+        for s in r['slices']:
+            where = f"cpu {s['cputype']}/{s['cpusubtype']}" if 'cputype' in s else f"@{s['offset']:#x}"
+            entry = dict(s.get('metallib') or {'bytes': s.get('bytes', 0),
+                                               'error': f"非 metallib 切片，头部 {s.get('magic')}"})
+            entry['label'] = f"{r['label']} [{where}]"
+            rows.append(entry)
+    return rows
+
+
 def render(reports):
     out = ['# Metal 库 AIR 检查', '',
            '| 文件 | 大小 | 文件格式 | 目标系统 | 函数 | AIR / MSL 版本 | 目标三元组 | 含 agx 名称的函数 |',
            '|---|---|---|---|---|---|---|---|']
-    for r in reports:
+    rows = flatten(reports)
+    for r in rows:
         h = r.get('header') or {}
         name = r['label']
         if 'error' in r and not r.get('functions'):
-            out.append(f"| `{name}` | {r['bytes']} | — | — | — | {r['error']} | — | — |")
+            detail = r['error'] + (f"，头部 {r['magic']}" if r.get('magic') else '')
+            out.append(f"| `{name}` | {r['bytes']} | — | — | — | {detail} | — | — |")
             continue
         out.append(
             f"| `{name}` | {r['bytes']} | {h.get('file_version')}{' (截断)' if r.get('truncated') else ''} | "
@@ -160,7 +222,7 @@ def render(reports):
             f"{', '.join(f'{k} ×{v}' for k, v in r['versions'].items()) or '—'} | "
             f"{', '.join(r['triples']) or '—'} | {r['functions_with_agx']} |")
     out.append('')
-    for r in reports:
+    for r in rows:
         if not r.get('agx_names') and not r.get('air_families'):
             continue
         out += [f"## `{r['label']}`", '']
@@ -207,7 +269,7 @@ def main():
         json.dump(reports, fh, indent=1, ensure_ascii=False, default=list)
     with open(args.out + '.md', 'w', encoding='utf-8') as fh:
         fh.write(render(reports))
-    for r in reports:
+    for r in flatten(reports):
         print(f"{r['label']}: {r.get('versions') or r.get('error')} triples={list(r.get('triples', {}))} "
               f"agx_functions={r.get('functions_with_agx')}")
 
