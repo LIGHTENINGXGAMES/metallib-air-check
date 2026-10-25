@@ -189,8 +189,11 @@ def analyse_bytes(d, report):
         'air_names': len(air),
         'air_families': dict(collections.Counter(
             '.'.join(n.split('.')[:2]) for n in air).most_common()),
-        'gpu_features': {k: sorted(n for n in air if k in n)[:12]
-                         for k in GPU_FEATURES if any(k in n for n in air)},
+        # air.compile.* are module-wide compiler flags (framebuffer_fetch_enable is
+        # set by default), not uses of the feature.
+        'gpu_features': {k: hits[:12] for k in GPU_FEATURES
+                         if (hits := sorted(n for n in air
+                                            if k in n and not n.startswith('air.compile.')))},
     })
     return report
 
