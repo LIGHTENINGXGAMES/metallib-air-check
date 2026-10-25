@@ -61,10 +61,12 @@ jobs:
           cat work/img/extracted.json
           archive=$(python3 -c "import json; print(json.load(open('work/img/extracted.json'))[0])")
           if [[ "$archive" == *.aea ]]; then
+            # The decrypted image lands directly in --output, not beside the .aea.
             ipsw fw aea --output work/img "$archive"
             rm -f "$archive"
-            archive=${archive%.aea}
+            archive=work/img/$(basename "${archive%.aea}")
           fi
+          [ -s "$archive" ] || { echo "decrypted image not found: $archive"; exit 1; }
           ls -l work/img
           echo "DMG=$archive" >> "$GITHUB_ENV"
 
