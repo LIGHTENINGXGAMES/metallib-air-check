@@ -9,7 +9,8 @@
 
 Actions → **metallib AIR check** → Run workflow。默认取 iPhone17,3 27.0（24A437）的 OS cryptex（`sys`，约 2.2 GiB），其中有 QuartzCore 和 CoreImage 的系统库。
 
-步骤：`ipsw extract --remote --dmg` 取镜像，`ipsw fw aea` 解密，7-Zip 26.04 从 APFS 里只解出 `*.metallib*`，最后由 `tools/metallib_info.py` 分析。
+步骤：`ipsw extract --remote --dmg` 取镜像，`ipsw fw aea` 解密，`tools/extract_apfs_files.py` 用 7-Zip 26.04 从 APFS 里只取出 metallib，最后由 `tools/metallib_info.py` 分析。
+系统库用 APFS 的 LZBITMAP 透明压缩存放，7-Zip 解不了；脚本会单独读出 decmpfs 属性和资源分叉，用按固定提交编译的 [libzbitmap](https://github.com/eafer/libzbitmap)（MIT）解压。
 
 ## 报告
 

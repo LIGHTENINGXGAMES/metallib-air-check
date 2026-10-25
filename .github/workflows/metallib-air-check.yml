@@ -25,6 +25,9 @@ jobs:
       IPSW_SHA256: 7ac425f5ad069c8582760b514805402c964d0224fda905dd983dc35e4fea4137
       SEVENZIP_TAG: '26.04'
       SEVENZIP_SHA256: fc0327ba27e89bd086cf426dff17d77de582953cdbbc10a6576540a06853ffcd
+      ZBITMAP_COMMIT: 574abeae25b25c3319b9b6a9225cc7464e08ae88
+      ZBITMAP_C_SHA256: 52c2d9ad8ffd821d08ac65fc33d65b6ea848fe90e02e73e6a9dbc81c23ed826f
+      ZBITMAP_H_SHA256: a215cdcde2255ea551d15d69db0e301667d0fce659d3da73861f0cf255e9613b
       IPSW_URL: ${{ inputs.ipsw_url }}
       DEVICE: ${{ inputs.device }}
       IMAGE: ${{ inputs.image }}
@@ -53,6 +56,18 @@ jobs:
           echo "$RUNNER_TEMP/7z" >> "$GITHUB_PATH"
           "$RUNNER_TEMP/7z/7zz" | head -n 3
 
+      # System libraries are stored with APFS LZBITMAP compression, which 7-Zip cannot decode.
+      - name: Build libzbitmap
+        run: |
+          base="https://raw.githubusercontent.com/eafer/libzbitmap/${ZBITMAP_COMMIT}"
+          mkdir -p "$RUNNER_TEMP/zbm"
+          curl -fsSL -o "$RUNNER_TEMP/zbm/libzbitmap.c" "$base/libzbitmap.c"
+          curl -fsSL -o "$RUNNER_TEMP/zbm/libzbitmap.h" "$base/libzbitmap.h"
+          printf '%s  %s\n' "$ZBITMAP_C_SHA256" "$RUNNER_TEMP/zbm/libzbitmap.c" \
+            "$ZBITMAP_H_SHA256" "$RUNNER_TEMP/zbm/libzbitmap.h" | sha256sum -c -
+          gcc -O2 -shared -fPIC -o "$RUNNER_TEMP/zbm/libzbitmap.so" "$RUNNER_TEMP/zbm/libzbitmap.c"
+          echo "ZBITMAP=$RUNNER_TEMP/zbm/libzbitmap.so" >> "$GITHUB_ENV"
+
       - name: Fetch and decrypt image
         run: |
           mkdir -p work/img
@@ -70,17 +85,15 @@ jobs:
           ls -l work/img
           echo "DMG=$archive" >> "$GITHUB_ENV"
 
-      # 7-Zip reports the DMG-as-APFS fallback as a warning (exit 1).
       - name: Extract metallibs
         run: |
-          rc=0
-          7zz x -y -owork/files "$DMG" '-ir!*.metallib*' > work/extract.log 2>&1 || rc=$?
-          tail -n 20 work/extract.log
-          [ "$rc" -le 1 ] || exit "$rc"
+          python3 tools/extract_apfs_files.py "$DMG" work/files --pattern '\.metallib' \
+            --sevenzip 7zz --zbitmap "$ZBITMAP"
           rm -f "$DMG"
           mkdir -p out
-          (cd work/files && find . -type f -printf '%s\t%p\n' | sort -k2) > out/files.tsv
-          echo "$(wc -l < out/files.tsv) metallib files"
+          cp work/files/.manifest.json out/files.json
+          (cd work/files && find . -type f ! -name '.*' -printf '%s\t%p\n' | sort -k2) > out/files.tsv
+          cat out/files.tsv
 
       - name: Analyse
         run: python3 tools/metallib_info.py work/files --out out/metallibs
