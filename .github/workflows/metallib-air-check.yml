@@ -1,0 +1,102 @@
+name: metallib AIR check
+
+on:
+  workflow_dispatch:
+    inputs:
+      ipsw_url:
+        description: IPSW 地址
+        default: https://updates.cdn-apple.com/2026FallFCS/5130b3f9-3b4e-469a-b60e-93f6b310cdd9/iPhone17,3_27.0_24A437_Restore.ipsw
+      device:
+        description: 机型
+        default: iPhone17,3
+      image:
+        description: 镜像（sys = OS cryptex，约 2.2 GiB；fs = 主文件系统，约 8.3 GiB，可能超出 runner 磁盘）
+        default: sys
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    env:
+      IPSW_VERSION: 3.1.737
+      IPSW_SHA256: 7ac425f5ad069c8582760b514805402c964d0224fda905dd983dc35e4fea4137
+      SEVENZIP_TAG: '26.04'
+      SEVENZIP_SHA256: fc0327ba27e89bd086cf426dff17d77de582953cdbbc10a6576540a06853ffcd
+      IPSW_URL: ${{ inputs.ipsw_url }}
+      DEVICE: ${{ inputs.device }}
+      IMAGE: ${{ inputs.image }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install ipsw
+        run: |
+          curl -fsSL -o "$RUNNER_TEMP/ipsw.tgz" \
+            "https://github.com/blacktop/ipsw/releases/download/v${IPSW_VERSION}/ipsw_${IPSW_VERSION}_linux_x86_64.tar.gz"
+          echo "${IPSW_SHA256}  $RUNNER_TEMP/ipsw.tgz" | sha256sum -c -
+          mkdir -p "$RUNNER_TEMP/ipsw"
+          tar -xzf "$RUNNER_TEMP/ipsw.tgz" -C "$RUNNER_TEMP/ipsw"
+          bin=$(find "$RUNNER_TEMP/ipsw" -type f -name ipsw -perm -u+x | head -n1)
+          dirname "$bin" >> "$GITHUB_PATH"
+          "$bin" version
+
+      # Ubuntu's 7-Zip is too old to read APFS; use the upstream release.
+      - name: Install 7-Zip
+        run: |
+          curl -fsSL -o "$RUNNER_TEMP/7z.tar.xz" \
+            "https://github.com/ip7z/7zip/releases/download/${SEVENZIP_TAG}/7z${SEVENZIP_TAG//./}-linux-x64.tar.xz"
+          echo "${SEVENZIP_SHA256}  $RUNNER_TEMP/7z.tar.xz" | sha256sum -c -
+          mkdir -p "$RUNNER_TEMP/7z"
+          tar -xJf "$RUNNER_TEMP/7z.tar.xz" -C "$RUNNER_TEMP/7z"
+          echo "$RUNNER_TEMP/7z" >> "$GITHUB_PATH"
+          "$RUNNER_TEMP/7z/7zz" | head -n 3
+
+      - name: Fetch and decrypt image
+        run: |
+          mkdir -p work/img
+          ipsw extract --remote --device "$DEVICE" --dmg "$IMAGE" --flat \
+            --output work/img --json "$IPSW_URL" > work/img/extracted.json
+          cat work/img/extracted.json
+          archive=$(python3 -c "import json; print(json.load(open('work/img/extracted.json'))[0])")
+          if [[ "$archive" == *.aea ]]; then
+            ipsw fw aea --output work/img "$archive"
+            rm -f "$archive"
+            archive=${archive%.aea}
+          fi
+          ls -l work/img
+          echo "DMG=$archive" >> "$GITHUB_ENV"
+
+      # 7-Zip reports the DMG-as-APFS fallback as a warning (exit 1).
+      - name: Extract metallibs
+        run: |
+          rc=0
+          7zz x -y -owork/files "$DMG" '-ir!*.metallib*' > work/extract.log 2>&1 || rc=$?
+          tail -n 20 work/extract.log
+          [ "$rc" -le 1 ] || exit "$rc"
+          rm -f "$DMG"
+          mkdir -p out
+          (cd work/files && find . -type f -printf '%s\t%p\n' | sort -k2) > out/files.tsv
+          echo "$(wc -l < out/files.tsv) metallib files"
+
+      - name: Analyse
+        run: python3 tools/metallib_info.py work/files --out out/metallibs
+
+      - name: Job summary
+        if: always()
+        run: |
+          if [ -f out/metallibs.md ]; then
+            head -c 1000000 out/metallibs.md >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "没有生成报告，请查看各步骤日志。" >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+      # Reports only: names, versions and counts. No Apple binaries are uploaded.
+      - name: Upload report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: metallib-report
+          path: out/
+          if-no-files-found: warn
